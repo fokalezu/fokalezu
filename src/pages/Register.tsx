@@ -1,11 +1,13 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { Link, useNavigate, Navigate } from 'react-router-dom';
-import { Eye, EyeOff, Mail, User, Lock } from 'lucide-react';
+import { Eye, EyeOff, Mail, User, Lock, AlertTriangle, Check } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
+import ReCAPTCHA from 'react-google-recaptcha';
+import zxcvbn from 'zxcvbn';
 
 const schema = z.object({
   name: z.string().min(1, 'Numele este obligatoriu'),
@@ -19,19 +21,87 @@ const schema = z.object({
 
 type FormData = z.infer<typeof schema>;
 
+interface PasswordStrength {
+  score: number;
+  feedback: {
+    warning: string;
+    suggestions: string[];
+  };
+}
+
+const getPasswordStrengthColor = (score: number): string => {
+  switch (score) {
+    case 0:
+      return 'bg-red-500';
+    case 1:
+      return 'bg-orange-500';
+    case 2:
+      return 'bg-yellow-500';
+    case 3:
+      return 'bg-lime-500';
+    case 4:
+      return 'bg-green-500';
+    default:
+      return 'bg-gray-200';
+  }
+};
+
+const getPasswordStrengthText = (score: number): string => {
+  switch (score) {
+    case 0:
+      return 'Foarte slabă';
+    case 1:
+      return 'Slabă';
+    case 2:
+      return 'Medie';
+    case 3:
+      return 'Bună';
+    case 4:
+      return 'Puternică';
+    default:
+      return 'Introduceți parola';
+  }
+};
+
 const Register = () => {
-  const { register, handleSubmit, formState: { errors } } = useForm<FormData>({
+  const { register, handleSubmit, formState: { errors }, watch } = useForm<FormData>({
     resolver: zodResolver(schema)
   });
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [passwordStrength, setPasswordStrength] = useState<PasswordStrength>({
+    score: 0,
+    feedback: { warning: '', suggestions: [] }
+  });
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
   const navigate = useNavigate();
   const { signUp, user } = useAuth();
 
-  // All hooks are now before any conditional returns
+  const watchPassword = watch('password');
+
+  useEffect(() => {
+    if (watchPassword) {
+      const result = zxcvbn(watchPassword);
+      setPasswordStrength({
+        score: result.score,
+        feedback: result.feedback
+      });
+    } else {
+      setPasswordStrength({
+        score: 0,
+        feedback: { warning: '', suggestions: [] }
+      });
+    }
+  }, [watchPassword]);
+
   const onSubmit = async (data: FormData) => {
+    if (!captchaToken) {
+      setError('Te rugăm să completezi verificarea reCAPTCHA');
+      return;
+    }
+
     try {
       setError(null);
       setIsLoading(true);
@@ -78,8 +148,9 @@ const Register = () => {
         <h2 className="text-3xl font-bold text-center mb-8 text-gray-800">Înregistrare</h2>
         
         {error && (
-          <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded">
-            {error}
+          <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded flex items-start">
+            <AlertTriangle className="h-5 w-5 mr-2 mt-0.5 flex-shrink-0" />
+            <p>{error}</p>
           </div>
         )}
 
@@ -150,6 +221,38 @@ const Register = () => {
             {errors.password && (
               <p className="mt-1 text-sm text-red-600">{errors.password.message}</p>
             )}
+            
+            {/* Password Strength Indicator */}
+            {watchPassword && (
+              <div className="mt-2">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-sm text-gray-600">
+                    Putere parolă: {getPasswordStrengthText(passwordStrength.score)}
+                  </span>
+                  {passwordStrength.score >= 3 && (
+                    <Check className="h-4 w-4 text-green-500" />
+                  )}
+                </div>
+                <div className="h-2 w-full bg-gray-200 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full transition-all duration-300 ${getPasswordStrengthColor(passwordStrength.score)}`}
+                    style={{ width: `${(passwordStrength.score + 1) * 20}%` }}
+                  />
+                </div>
+                {passwordStrength.feedback.warning && (
+                  <p className="mt-1 text-sm text-orange-600">
+                    {passwordStrength.feedback.warning}
+                  </p>
+                )}
+                {passwordStrength.feedback.suggestions.length > 0 && (
+                  <ul className="mt-1 text-sm text-gray-600 list-disc list-inside">
+                    {passwordStrength.feedback.suggestions.map((suggestion, index) => (
+                      <li key={index}>{suggestion}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
           </div>
 
           <div>
@@ -182,10 +285,18 @@ const Register = () => {
             )}
           </div>
 
+          {/* reCAPTCHA */}
+          <div className="flex justify-center">
+            <ReCAPTCHA
+              sitekey="6LfSZOEqAAAAAGdYsIhLFS0mIpeLfqQSpWihXIb-" // Replace with your actual site key
+              onChange={(token) => setCaptchaToken(token)}
+            />
+          </div>
+
           <button
             type="submit"
             className="w-full bg-purple-600 text-white py-2 px-4 rounded-md hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            disabled={isLoading}
+            disabled={isLoading || !captchaToken || passwordStrength.score < 2}
           >
             {isLoading ? 'Se procesează...' : 'Înregistrare'}
           </button>

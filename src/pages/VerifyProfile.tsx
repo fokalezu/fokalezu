@@ -1,61 +1,111 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Camera, Shield, CheckCircle, AlertCircle } from 'lucide-react';
+import { Shield, CheckCircle, AlertCircle, BadgeCheck, Camera, RefreshCw } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
+import Webcam from 'react-webcam';
+
+interface Profile {
+  verification_status: boolean;
+  user_type: 'standard' | 'verified' | 'premium';
+}
 
 const VerifyProfile = () => {
-  const [isCapturing, setIsCapturing] = useState(false);
-  const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [verificationSubmitted, setVerificationSubmitted] = useState(false);
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [capturedImage, setCapturedImage] = useState<string | null>(null);
+  const [isMobile] = useState(() => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent));
+  const webcamRef = React.useRef<Webcam>(null);
   const navigate = useNavigate();
   const { user } = useAuth();
 
-  const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user' },
-        audio: false
-      });
-      
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        streamRef.current = stream;
+  const videoConstraints = {
+    width: { ideal: 1280 },
+    height: { ideal: 720 },
+    facingMode: isMobile ? { exact: "user" } : "user"
+  };
+
+  useEffect(() => {
+    const fetchProfile = async () => {
+      if (!user) return;
+
+      try {
+        const { data, error } = await supabase
+          .from('profiles')
+          .select('verification_status, user_type')
+          .eq('user_id', user.id)
+          .single();
+
+        if (error) throw error;
+        setProfile(data);
+      } catch (err) {
+        console.error('Error fetching profile:', err);
+        setError('A apărut o eroare la încărcarea profilului');
+      } finally {
+        setLoading(false);
       }
-      setIsCapturing(true);
-      setError(null);
-    } catch (err) {
-      setError('Nu s-a putut accesa camera. Te rugăm să verifici permisiunile.');
-      console.error('Error accessing camera:', err);
-    }
+    };
+
+    fetchProfile();
+  }, [user]);
+
+  const startCamera = () => {
+    setIsCameraActive(true);
+    setCapturedImage(null);
+    setError(null);
   };
 
-  const stopCamera = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
-    setIsCapturing(false);
-  };
-
-  const capturePhoto = () => {
-    if (videoRef.current) {
+  const capture = React.useCallback(() => {
+    if (webcamRef.current) {
       const canvas = document.createElement('canvas');
-      canvas.width = videoRef.current.videoWidth;
-      canvas.height = videoRef.current.videoHeight;
-      const ctx = canvas.getContext('2d');
+      const video = webcamRef.current.video;
       
-      if (ctx) {
-        ctx.drawImage(videoRef.current, 0, 0);
-        const imageData = canvas.toDataURL('image/jpeg');
-        setCapturedImage(imageData);
-        stopCamera();
-      }
+      if (!video) return;
+      
+      // Set canvas dimensions to match video
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      
+      // Flip the image horizontally
+      ctx.translate(canvas.width, 0);
+      ctx.scale(-1, 1);
+      
+      // Draw the video frame
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      
+      // Convert to base64
+      const imageData = canvas.toDataURL('image/jpeg');
+      setCapturedImage(imageData);
+      setIsCameraActive(false);
     }
+  }, [webcamRef]);
+
+  const retake = () => {
+    setCapturedImage(null);
+    setIsCameraActive(true);
+  };
+
+  const dataURLtoBlob = (dataurl: string) => {
+    const arr = dataurl.split(',');
+    if (arr.length < 2) return null;
+    
+    const mime = arr[0].match(/:(.*?);/)?.[1];
+    const bstr = atob(arr[1]);
+    let n = bstr.length;
+    const u8arr = new Uint8Array(n);
+    
+    while (n--) {
+      u8arr[n] = bstr.charCodeAt(n);
+    }
+    
+    return new Blob([u8arr], { type: mime });
   };
 
   const submitVerification = async () => {
@@ -66,23 +116,38 @@ const VerifyProfile = () => {
       setError(null);
 
       // Convert base64 image to blob
-      const base64Response = await fetch(capturedImage);
-      const blob = await base64Response.blob();
+      const imageBlob = dataURLtoBlob(capturedImage);
+      if (!imageBlob) {
+        throw new Error('Error processing image');
+      }
+
+      // Create a File object from the blob
+      const imageFile = new File([imageBlob], `verification_${Date.now()}.jpg`, {
+        type: 'image/jpeg'
+      });
 
       // Upload verification photo to Supabase Storage
-      const fileName = `verification/${user.id}/${Date.now()}.jpg`;
+      const fileName = `verification/${user.id}/${Date.now()}_verification.jpg`;
       const { error: uploadError } = await supabase.storage
         .from('verifications')
-        .upload(fileName, blob);
+        .upload(fileName, imageFile, {
+          cacheControl: '3600',
+          upsert: true
+        });
 
       if (uploadError) throw uploadError;
+
+      // Get the public URL of the uploaded photo
+      const { data: { publicUrl } } = supabase.storage
+        .from('verifications')
+        .getPublicUrl(fileName);
 
       // Update profile verification status
       const { error: updateError } = await supabase
         .from('profiles')
         .update({
-          verification_status: false, // Pending verification
-          verification_photo: fileName,
+          verification_status: false, // În așteptare
+          verification_photo: publicUrl,
           verification_submitted_at: new Date().toISOString()
         })
         .eq('user_id', user.id);
@@ -101,10 +166,59 @@ const VerifyProfile = () => {
     }
   };
 
-  const retakePhoto = () => {
-    setCapturedImage(null);
-    startCamera();
-  };
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-xl text-gray-600">Se încarcă...</div>
+      </div>
+    );
+  }
+
+  if (profile?.verification_status) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-purple-500 to-pink-500 py-12 px-4 sm:px-6 lg:px-8">
+        <div className="max-w-3xl mx-auto">
+          <div className="bg-white rounded-lg shadow-xl overflow-hidden">
+            <div className="px-6 py-8 text-center">
+              <div className="mx-auto w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mb-4">
+                <BadgeCheck className="h-10 w-10 text-green-600" />
+              </div>
+              <h2 className="text-3xl font-bold text-gray-900 mb-4">Profilul Tău Este Verificat!</h2>
+              <div className="prose prose-lg max-w-none text-gray-600">
+                <p className="mb-4">
+                  Felicitări! Profilul tău a fost deja verificat și beneficiezi de toate avantajele unui cont verificat:
+                </p>
+                <ul className="text-left space-y-2 mb-6">
+                  <li className="flex items-center">
+                    <CheckCircle className="h-5 w-5 text-green-500 mr-2" />
+                    Badge-ul special de profil verificat
+                  </li>
+                  <li className="flex items-center">
+                    <CheckCircle className="h-5 w-5 text-green-500 mr-2" />
+                    Poziționare prioritară în rezultatele căutării
+                  </li>
+                  <li className="flex items-center">
+                    <CheckCircle className="h-5 w-5 text-green-500 mr-2" />
+                    Încărcare de până la 8 fotografii
+                  </li>
+                  <li className="flex items-center">
+                    <CheckCircle className="h-5 w-5 text-green-500 mr-2" />
+                    Credibilitate crescută în fața vizitatorilor
+                  </li>
+                </ul>
+                <button
+                  onClick={() => navigate('/dashboard')}
+                  className="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500"
+                >
+                  Înapoi la Dashboard
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-500 to-pink-500 py-12 px-4 sm:px-6 lg:px-8">
@@ -179,7 +293,7 @@ const VerifyProfile = () => {
                   3
                 </div>
                 <p className="ml-3 text-gray-600">
-                  Ține coala în mână și fă-ți un selfie clar cu fața și textul vizibil
+                  Fă-ți un selfie clar cu fața și textul vizibil folosind camera web sau telefonul
                 </p>
               </div>
             </div>
@@ -204,38 +318,37 @@ const VerifyProfile = () => {
               </div>
             ) : (
               <div className="space-y-6">
-                {!isCapturing && !capturedImage && (
-                  <button
-                    onClick={startCamera}
-                    className="w-full flex items-center justify-center px-4 py-3 border border-transparent text-base font-medium rounded-md text-white bg-purple-600 hover:bg-purple-700"
-                  >
-                    <Camera className="h-5 w-5 mr-2" />
-                    Pornește Camera
-                  </button>
+                {!isCameraActive && !capturedImage && (
+                  <div className="text-center">
+                    <button
+                      onClick={startCamera}
+                      className="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500"
+                    >
+                      <Camera className="h-5 w-5 mr-2" />
+                      Pornește Camera
+                    </button>
+                  </div>
                 )}
 
-                {isCapturing && (
+                {isCameraActive && (
                   <div className="space-y-4">
-                    <div className="relative aspect-video rounded-lg overflow-hidden bg-black">
-                      <video
-                        ref={videoRef}
-                        autoPlay
-                        playsInline
-                        className="w-full h-full object-cover"
+                    <div className="relative max-w-2xl mx-auto">
+                      <Webcam
+                        audio={false}
+                        ref={webcamRef}
+                        screenshotFormat="image/jpeg"
+                        videoConstraints={videoConstraints}
+                        className="w-full rounded-lg"
+                        mirrored={true}
                       />
                     </div>
-                    <div className="flex justify-center space-x-4">
+                    <div className="flex justify-center">
                       <button
-                        onClick={capturePhoto}
-                        className="px-4 py-2 border border-transparent text-base font-medium rounded-md text-white bg-purple-600 hover:bg-purple-700"
+                        onClick={capture}
+                        className="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
                       >
-                        Captează Fotografia
-                      </button>
-                      <button
-                        onClick={stopCamera}
-                        className="px-4 py-2 border border-gray-300 text-base font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50"
-                      >
-                        Anulează
+                        <Camera className="h-5 w-5 mr-2" />
+                        Captureaza Imaginea
                       </button>
                     </div>
                   </div>
@@ -243,27 +356,27 @@ const VerifyProfile = () => {
 
                 {capturedImage && (
                   <div className="space-y-4">
-                    <div className="relative aspect-video rounded-lg overflow-hidden bg-black">
+                    <div className="relative max-w-2xl mx-auto">
                       <img
                         src={capturedImage}
-                        alt="Captured verification"
-                        className="w-full h-full object-cover"
+                        alt="Captured"
+                        className="w-full rounded-lg"
                       />
                     </div>
                     <div className="flex justify-center space-x-4">
                       <button
-                        onClick={submitVerification}
-                        disabled={isSubmitting}
-                        className="px-4 py-2 border border-transparent text-base font-medium rounded-md text-white bg-green-600 hover:bg-green-700 disabled:opacity-50"
+                        onClick={retake}
+                        className="inline-flex items-center px-6 py-3 border border-gray-300 text-base font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500"
                       >
-                        {isSubmitting ? 'Se trimite...' : 'Trimite pentru Verificare'}
+                        <RefreshCw className="h-5 w-5 mr-2" />
+                        Reîncearcă
                       </button>
                       <button
-                        onClick={retakePhoto}
+                        onClick={submitVerification}
                         disabled={isSubmitting}
-                        className="px-4 py-2 border border-gray-300 text-base font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
+                        className="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:opacity-50"
                       >
-                        Refă Fotografia
+                        {isSubmitting ? 'Se trimite...' : 'Trimite pentru Verificare'}
                       </button>
                     </div>
                   </div>
